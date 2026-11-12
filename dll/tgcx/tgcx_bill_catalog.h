@@ -207,20 +207,16 @@ static constexpr const char* tgcx_bill_governments[] = {"Prussian Constitutional
 static constexpr unsigned tgcx_bill_limited_count = 7;
 static constexpr bool tgcx_bill_distrusted[] = {false,false,false,false,true,true,true,true,true};
 static constexpr const char* tgcx_bill_stance_codes[] = {"m2","m1","z","p1","p2"};
-static constexpr int tgcx_bill_abstain_price[] = {5,2,0,0,0};
-static constexpr int tgcx_bill_aye_price[] = {0,5,2,2,2};
-static constexpr int tgcx_bill_broken_factor = 2;
-static constexpr int tgcx_bill_audience_price = 10;
 static constexpr int tgcx_bill_debate_days = 90;
-static constexpr int tgcx_bill_broken_militancy = 2;
-static constexpr int tgcx_bill_broken_years = 10;
+static constexpr int tgcx_bill_ask_free = 1, tgcx_bill_ask_freeze = 2, tgcx_bill_ask_law = 3;
+static constexpr const char* tgcx_bill_band_names[] = {"Refuses to deal","Hostile","Neutral","Friendly","Ally"};
+static constexpr int tgcx_bill_ally_band = 4;
 static constexpr int tgcx_bill_width = 900, tgcx_bill_height = 772;
 static constexpr int tgcx_bill_cards = 3, tgcx_bill_card_y = 152, tgcx_bill_card_step = 96;
 static constexpr int tgcx_bill_cb = 377, tgcx_bill_cc = 509, tgcx_bill_ce = 827, tgcx_bill_crown_y = 440;
 static constexpr int tgcx_bill_chart[] = {72,207,260,128};
 static constexpr int tgcx_bill_chart_patch[] = {64,205,276,135};
 static constexpr int tgcx_bill_mode_x[] = {90,177,265}, tgcx_bill_mode_y = 183;
-static constexpr int tgcx_bill_lot_x[] = {172,256}, tgcx_bill_lot_y = 518;
 static constexpr int tgcx_bill_legend_x[] = {90,163,260}, tgcx_bill_legend_y = 345;
 static constexpr int tgcx_bill_atlas_size[] = {256,512};
 static constexpr int tgcx_bill_icon_y = 168, tgcx_bill_icon_cell = 36, tgcx_bill_icon_columns = 7;
@@ -233,6 +229,15 @@ static constexpr int tgcx_bill_cell_row[] = {0,52,151,14};
 static constexpr int tgcx_bill_cell_off111[] = {0,66,111,34};
 static constexpr int tgcx_bill_cell_off144[] = {0,100,144,34};
 static constexpr int tgcx_bill_cell_off177[] = {0,134,177,34};
+static constexpr int tgcx_bill_char_groups = 23;
+struct tgcx_BillChar { const char* tag; const char* name; const char* card_name;
+    unsigned char bloc, slot, ideal[23]; };
+static constexpr tgcx_BillChar tgcx_bill_chars[] = {
+    {"ENG","Duke of Wellington","Duke of Wellington",0,0,{255,255,255,255,0,2,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255}},
+    {"ENG","Sir Robert Peel","Sir Robert Peel",0,1,{255,255,255,255,255,2,255,255,255,255,255,255,255,255,1,255,255,255,255,255,255,255,255}},
+    {"ENG","Viscount Melbourne","Viscount Melbourne",5,0,{255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255}},
+    {"","","",255,255,{255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255}},
+};
 static constexpr const char tgcx_bill_bg_file[] = "tgcx_bill_bg.dds";
 static constexpr const char tgcx_bill_atlas_file[] = "tgcx_bill_atlas.dds";
 struct tgcx_BillButtonInfo { const char* name; short x, y, w, h; };
@@ -245,8 +250,6 @@ static constexpr tgcx_BillButtonInfo tgcx_bill_buttons[] = {
     {"tgcx_bill_mode_0",90,183,20,20},
     {"tgcx_bill_mode_1",177,183,20,20},
     {"tgcx_bill_mode_2",265,183,20,20},
-    {"tgcx_bill_lot_0",172,518,20,20},
-    {"tgcx_bill_lot_1",256,518,20,20},
     {"tgcx_bill_card_0_a",509,207,144,34},
     {"tgcx_bill_card_0_b",665,207,144,34},
     {"tgcx_bill_card_1_a",509,303,144,34},
@@ -267,8 +270,6 @@ enum tgcx_BillButtonId {
     TGCX_B_MODE_0,
     TGCX_B_MODE_1,
     TGCX_B_MODE_2,
-    TGCX_B_LOT_0,
-    TGCX_B_LOT_1,
     TGCX_B_CARD_0_A,
     TGCX_B_CARD_0_B,
     TGCX_B_CARD_1_A,
@@ -295,28 +296,17 @@ static constexpr const char* tgcx_bill_text_names[] = {
     "tgcx_bill_t_legend_1",
     "tgcx_bill_t_legend_2",
     "tgcx_bill_t_chart_note",
-    "tgcx_bill_t_favour_header",
-    "tgcx_bill_t_favours",
-    "tgcx_bill_t_favours_cap",
-    "tgcx_bill_t_rate",
-    "tgcx_bill_t_spent",
-    "tgcx_bill_t_sources",
-    "tgcx_bill_t_price_header",
-    "tgcx_bill_t_lots_label",
-    "tgcx_bill_t_lot_0",
-    "tgcx_bill_t_lot_1",
-    "tgcx_bill_t_table_0_name",
-    "tgcx_bill_t_table_0_abstain",
-    "tgcx_bill_t_table_0_aye",
-    "tgcx_bill_t_table_1_name",
-    "tgcx_bill_t_table_1_abstain",
-    "tgcx_bill_t_table_1_aye",
-    "tgcx_bill_t_table_2_name",
-    "tgcx_bill_t_table_2_abstain",
-    "tgcx_bill_t_table_2_aye",
-    "tgcx_bill_t_table_3_name",
-    "tgcx_bill_t_table_3_abstain",
-    "tgcx_bill_t_table_3_aye",
+    "tgcx_bill_t_ask_header",
+    "tgcx_bill_t_ask_0_name",
+    "tgcx_bill_t_ask_0_abstain",
+    "tgcx_bill_t_ask_0_aye",
+    "tgcx_bill_t_ask_1_name",
+    "tgcx_bill_t_ask_1_abstain",
+    "tgcx_bill_t_ask_1_aye",
+    "tgcx_bill_t_ask_2_name",
+    "tgcx_bill_t_ask_2_abstain",
+    "tgcx_bill_t_ask_2_aye",
+    "tgcx_bill_t_ask_note",
     "tgcx_bill_t_debt_header",
     "tgcx_bill_t_debt_0",
     "tgcx_bill_t_debt_1",
@@ -410,28 +400,17 @@ enum tgcx_BillTextId {
     TGCX_T_LEGEND_1,
     TGCX_T_LEGEND_2,
     TGCX_T_CHART_NOTE,
-    TGCX_T_FAVOUR_HEADER,
-    TGCX_T_FAVOURS,
-    TGCX_T_FAVOURS_CAP,
-    TGCX_T_RATE,
-    TGCX_T_SPENT,
-    TGCX_T_SOURCES,
-    TGCX_T_PRICE_HEADER,
-    TGCX_T_LOTS_LABEL,
-    TGCX_T_LOT_0,
-    TGCX_T_LOT_1,
-    TGCX_T_TABLE_0_NAME,
-    TGCX_T_TABLE_0_ABSTAIN,
-    TGCX_T_TABLE_0_AYE,
-    TGCX_T_TABLE_1_NAME,
-    TGCX_T_TABLE_1_ABSTAIN,
-    TGCX_T_TABLE_1_AYE,
-    TGCX_T_TABLE_2_NAME,
-    TGCX_T_TABLE_2_ABSTAIN,
-    TGCX_T_TABLE_2_AYE,
-    TGCX_T_TABLE_3_NAME,
-    TGCX_T_TABLE_3_ABSTAIN,
-    TGCX_T_TABLE_3_AYE,
+    TGCX_T_ASK_HEADER,
+    TGCX_T_ASK_0_NAME,
+    TGCX_T_ASK_0_ABSTAIN,
+    TGCX_T_ASK_0_AYE,
+    TGCX_T_ASK_1_NAME,
+    TGCX_T_ASK_1_ABSTAIN,
+    TGCX_T_ASK_1_AYE,
+    TGCX_T_ASK_2_NAME,
+    TGCX_T_ASK_2_ABSTAIN,
+    TGCX_T_ASK_2_AYE,
+    TGCX_T_ASK_NOTE,
     TGCX_T_DEBT_HEADER,
     TGCX_T_DEBT_0,
     TGCX_T_DEBT_1,

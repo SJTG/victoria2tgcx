@@ -15,7 +15,9 @@ import re
 import struct
 
 from PIL import Image, ImageDraw
-from gen_law_catalog import catalog_data
+from gen_law_catalog import ASK_FREE, ASK_FREEZE, ASK_LAW, CatalogGen, catalog_data
+import tgcx_leaders
+from tgcx_law_support import load_support
 from gen_laws import BLOC, DEFAULT_TGC, Gen, ROOT, as_dict
 from tgc_scan import parse, read
 
@@ -32,7 +34,8 @@ LX, LW = 60, 284
 CHART = (72, 207, 260, 128)           # projected-vote seats
 CHART_PATCH = (64, 205, 276, 135)     # background redrawn over the marker
 MODE_X, MODE_Y = (90, 177, 265), 183
-LOT_X, LOT_Y = (172, 256), 518
+# "What they ask": one block of three lines per visible card (name, Abstain, Aye).
+ASK_Y, ASK_STEP, ASK_LINE = 428, 56, 15
 LEGEND_X, LEGEND_Y = (90, 163, 260), 345
 
 # Atlas cells (x, y, w, h); the law icons follow in catalogue order.
@@ -54,7 +57,6 @@ def buttons():
                                          (CS, "GFX_sortbutton_80", 81), (CV, "GFX_sortbutton_80", 81))):
         out.append((f"tgcx_bill_sort_{n}", sprite, x, 116, w, 32))
     out += [(f"tgcx_bill_mode_{n}", "GFX_checkbox_default", x, MODE_Y, 20, 20) for n, x in enumerate(MODE_X)]
-    out += [(f"tgcx_bill_lot_{n}", "GFX_checkbox_default", x, LOT_Y, 20, 20) for n, x in enumerate(LOT_X)]
     for s in range(CARDS):
         out += [(f"tgcx_bill_card_{s}_a", "GFX_button_standard_144", CC, card_y(s) + 55, 144, 34),
                 (f"tgcx_bill_card_{s}_b", "GFX_button_standard_144", CC + 156, card_y(s) + 55, 144, 34)]
@@ -79,34 +81,24 @@ def texts():
           for n, (x, label) in enumerate(zip(MODE_X, ("By vote", "By bloc", "Both")))]
     t += [(f"legend_{n}", "", x + 14, LEGEND_Y - 4, 90, 20, "vic_18_black", "left") for n, x in enumerate(LEGEND_X)]
     t += [("chart_note", "", LX, 368, LW, 16, "Arial12_black", "centre"),
-          ("favour_header", "Political Favours", LX + 4, 405, LW - 8, 18, "vic_18", "centre"),
-          ("favours", "", 92, 435, 38, 24, "vic_22_black", "right"),
-          ("favours_cap", "/ 100", 135, 442, 45, 16, "Arial12_black", "left"),
-          ("rate", "", 194, 432, 146, 16, "Arial12_black", "left"),
-          ("spent", "", 194, 447, 146, 16, "Arial12_black", "left"),
-          ("sources", "", 194, 462, 146, 16, "Arial12_black", "left"),
-          ("price_header", "Price in Favours", LX + 4, 497, LW - 8, 18, "vic_18", "centre"),
-          ("lots_label", "Buy in lots of", LX + 10, 522, 100, 16, "Arial12_black", "left"),
-          ("lot_0", "5 seats", LOT_X[0] + 24, LOT_Y + 1, 60, 20, "vic_18_black", "left"),
-          ("lot_1", "25 seats", LOT_X[1] + 24, LOT_Y + 1, 60, 20, "vic_18_black", "left")]
-    rows = (("Bloc is", "Abstain", "Aye"), ("Friendly / neutral", "–", ""),
-            ("Against", "", ""), ("Strongly against", "", "promise"))
-    for i, (name, ab, aye) in enumerate(rows):
-        font = "Arial12_bold_black" if i == 0 else "Arial12_black"
-        y = 548 + 17 * i
-        t += [(f"table_{i}_name", name, 76, y, 104, 16, font, "left"),
-              (f"table_{i}_abstain", ab, 180, y, 76, 16, font, "centre"),
-              (f"table_{i}_aye", aye, 256, y, 80, 16, font, "centre")]
+          ("ask_header", "What They Ask", LX + 4, 405, LW - 8, 18, "vic_18", "centre")]
+    for n in range(CARDS):
+        y = ASK_Y + ASK_STEP * n
+        t += [(f"ask_{n}_name", "", LX + 10, y, LW - 20, 16, "Arial12_bold_black", "left"),
+              (f"ask_{n}_abstain", "", LX + 10, y + ASK_LINE, LW - 20, 16, "Arial12_black", "left"),
+              (f"ask_{n}_aye", "", LX + 10, y + 2 * ASK_LINE, LW - 20, 16, "Arial12_black", "left")]
+    t += [("ask_note", "", LX + 10, 604, LW - 20, 16, "Arial12_black", "left")]
     t += [("debt_header", "Debts", LX + 4, 637, LW - 8, 18, "vic_18", "centre")]
     t += [(f"debt_{i}", "", LX + 10, 658 + 15 * i, LW - 16, 16, "Arial12_black", "left") for i in range(4)]
-    t += [("bloc_header", "Upper House Blocs", 366, 88, 472, 24, "vic_22", "centre")]
-    for n, (x, w, label) in enumerate(((CB, 132, "Bloc"), (CC, 156, "Closeness"), (CS, 81, "Affinity"), (CV, 81, "Votes"))):
+    t += [("bloc_header", "Leaders of the Upper House", 366, 88, 472, 24, "vic_22", "centre")]
+    for n, (x, w, label) in enumerate(((CB, 132, "Leader"), (CC, 156, "Closeness"), (CS, 81, "Stance"), (CV, 81, "Votes"))):
         t.append((f"sort_{n}", label, x, 123, w, 20, "vic_18_black", "centre"))
     for s in range(CARDS):
         y = card_y(s)
         t += [(f"card_{s}_name", "", CB + 30, y + 7, 100, 20, "vic_18_black", "left"),
               (f"card_{s}_seats", "", CB + 30, y + 25, 100, 16, "Arial12_black", "left"),
-              (f"card_{s}_native", "", CB + 6, y + 40, 125, 16, "Arial12_black", "left")]
+              # The character's name (the header fits it to this box).
+              (f"card_{s}_native", "", CB + 6, y + 40, 125, 16, "Arial12_bold_black", "left")]
         t += [(f"card_{s}_option_{i}", "", CC + 20, y + 7 + 14 * i, 120, 14, "Arial12_black", "left") for i in range(3)]
         t += [(f"card_{s}_stance", "", CS, y + 7, CV - CS, 20, "vic_18_black", "centre"),
               (f"card_{s}_stance_note", "", CS, y + 25, CV - CS, 16, "Arial12_black", "centre"),
@@ -329,16 +321,6 @@ def section(w, h):
     return framed(w, h, [(90, 93, 90, 255), (162, 163, 156, 255), (200, 200, 189, 255)], (206, 203, 195, 255))
 
 
-def medallion():
-    image = Image.new("RGBA", (32, 31))
-    d = ImageDraw.Draw(image)
-    d.ellipse((0, 0, 31, 30), fill=(92, 78, 52, 255))
-    d.ellipse((2, 2, 29, 28), fill=(205, 172, 92, 255), outline=(120, 96, 50, 255))
-    d.ellipse((7, 7, 24, 23), fill=(232, 205, 128, 255))
-    d.line((9, 17, 15, 13, 22, 17), fill=(110, 80, 30, 255), width=3)          # two hands meeting
-    return image
-
-
 def background(path, tgc=DEFAULT_TGC):
     table = sprites(tgc)
     politics = texture(tgc, table["GFX_bg_politics"])
@@ -352,25 +334,20 @@ def background(path, tgc=DEFAULT_TGC):
         im.paste(art, (x, y), art)
     for x, w in ((62, 280), (366, 472)):
         im.paste(green.resize((w, 25)), (x, 86))
-    boxes = [(60, 156, 284, 238), (60, 400, 284, 86), (60, 492, 284, 134), (60, 632, 284, 100)]
+    boxes = [(60, 156, 284, 238), (60, 400, 284, 226), (60, 632, 284, 100)]
     boxes += [(CB - 3, card_y(s), CE - CB + 6, 92) for s in range(CARDS)]
     boxes += [(CB - 3, CROWN_Y, CE - CB + 6, 92), (CB - 3, LOG_Y, CE - CB + 6, 92)]
     for x, y, w, h in boxes:
         im.paste(section(w, h), (x, y))
-    for x, y, w in ((64, 160, 276), (64, 404, 276), (64, 496, 276), (64, 636, 276), (CB + 1, LOG_Y + 4, CE - CB - 2)):
+    for x, y, w in ((64, 160, 276), (64, 404, 276), (64, 636, 276), (CB + 1, LOG_Y + 4, CE - CB - 2)):
         art = nine(pill, 4, w, 18)
         im.paste(art, (x, y), art)
     d = ImageDraw.Draw(im)
     rule = (156, 158, 148, 255)
     d.line((68, 362, 68 + 267, 362), fill=rule)
-    d.line((184, 430, 184, 477), fill=rule)
-    im.paste(framed(268, 72, [(90, 93, 90, 255), (200, 200, 189, 255)], (226, 224, 214, 255)), (68, 544))
-    for x in (180, 256):
-        d.line((x, 546, x, 613), fill=rule)
-    for y in (563, 580, 597):
-        d.line((70, y, 333, y), fill=rule)
-    art = medallion()
-    im.paste(art, (72, 437), art)
+    for n in range(1, CARDS + 1):                       # under each character's three lines
+        y = ASK_Y + ASK_STEP * n - 7
+        d.line((68, y, 68 + 267, y), fill=rule)
     leader = texture(tgc, table["GFX_leader_generic0"])
     im.paste(leader, (CB + 2, CROWN_Y + 6), leader)
     d.line((CB + 4, CROWN_Y + 52, CE - 4, CROWN_Y + 52), fill=rule)
@@ -444,12 +421,45 @@ def write_dds(image, path):
 
 # ---------------------------------------------------------------- DLL header
 
+def characters_header(tgc, laws, affinity, groups, ideologies, chosen, boxes):
+    """The hand-written characters (data/tgcx_leaders.txt), for the DLL: their names and vision.
+
+    Automatic characters need no row: the DLL names them from their bloc and they hold their
+    ideology's ideals. `ideal` is an option index per law group, 254 = status quo, 255 = his
+    ideology's. The last row is a sentinel (no tag), so the table is never empty."""
+    gen = CatalogGen(laws, affinity, groups, ideologies, chosen, load_support(tgc, ideologies))
+    q = json.dumps
+    width, font = boxes["card_0_native"]
+    card = font_widths(tgc, font)
+    lines = [f"static constexpr int tgcx_bill_char_groups = {len(chosen)};",
+             "struct tgcx_BillChar { const char* tag; const char* name; const char* card_name;",
+             f"    unsigned char bloc, slot, ideal[{len(chosen)}]; }};",
+             "static constexpr tgcx_BillChar tgcx_bill_chars[] = {"]
+    for tag, parties in sorted(gen.char_data.items()):
+        for n, i in enumerate(ideologies):
+            if i not in gen.blocs:
+                continue
+            for slot, c in enumerate(tgcx_leaders.characters(parties, i, gen.rules, gen.singular(i))):
+                if c.auto:
+                    continue
+                c.name.encode("cp1252")
+                ideal = []
+                for g in chosen:
+                    spec = c.stance.get(g)
+                    ideal.append(255 if spec is None else 254 if spec["ideal"] == "status_quo"
+                                 else groups[g]["options"].index(spec["ideal"]))
+                lines.append(f"    {{{q(tag)},{q(c.name)},{q(fit(card, c.name, width))},{n},{slot},{{"
+                             + ",".join(map(str, ideal)) + "}},")
+    lines.append('    {"","","",255,255,{' + ",".join(["255"] * len(chosen)) + "}},")
+    lines.append("};")
+    return lines
+
+
 def catalogue_header(tgc=DEFAULT_TGC):
     laws, affinity, groups, ideologies, chosen, _ = catalog_data(tgc)
     aff = {i: dict(rows) for i, rows in affinity}
     bills = next(body for key, body in laws if key == "bills")
     L = numbers()
-    price = {kind: dict(values) for kind, values in L["price"]}
     leg = dict(L["legislature"])
     governments = [v for _, v in leg["limited"]] + [v for _, v in leg["full"]]
     distrust = [v for _, v in L["crown_distrusts"]]
@@ -502,25 +512,21 @@ def catalogue_header(tgc=DEFAULT_TGC):
               f"static constexpr unsigned tgcx_bill_limited_count = {len(leg['limited'])};",
               "static constexpr bool tgcx_bill_distrusted[] = {" + ",".join("true" if i in distrust else "false" for i in ideologies) + "};",
               "static constexpr const char* tgcx_bill_stance_codes[] = {\"m2\",\"m1\",\"z\",\"p1\",\"p2\"};",
-              # Price per 5 seats by stance -2..+2 (0: no such purchase); catalogue friendly Aye = undecided price.
-              "static constexpr int tgcx_bill_abstain_price[] = {" + ",".join(str(int(price["abstain"].get(s, 0))) for s in ("m2", "m1", "z", "p1", "p2")) + "};",
-              "static constexpr int tgcx_bill_aye_price[] = {" + ",".join(str(int(price["vote"].get(s, price["vote"]["z"] if s[0] == "p" else 0))) for s in ("m2", "m1", "z", "p1", "p2")) + "};",
-              f"static constexpr int tgcx_bill_broken_factor = {int(L['broken_debt_price_factor'])};",
-              f"static constexpr int tgcx_bill_audience_price = {int(L['audience'])};",
               f"static constexpr int tgcx_bill_debate_days = {int(L['debate_days'])};",
-              f"static constexpr int tgcx_bill_broken_militancy = {int(L['broken_debt_militancy'])};",
-              f"static constexpr int tgcx_bill_broken_years = {int(L['broken_debt_days']) // 365};",
+              f"static constexpr int tgcx_bill_ask_free = {ASK_FREE}, tgcx_bill_ask_freeze = {ASK_FREEZE}, tgcx_bill_ask_law = {ASK_LAW};",
+              "static constexpr const char* tgcx_bill_band_names[] = {\"Refuses to deal\",\"Hostile\",\"Neutral\",\"Friendly\",\"Ally\"};",
+              f"static constexpr int tgcx_bill_ally_band = {len(tgcx_leaders.BANDS)};",
               f"static constexpr int tgcx_bill_width = {WIDTH}, tgcx_bill_height = {HEIGHT};",
               f"static constexpr int tgcx_bill_cards = {CARDS}, tgcx_bill_card_y = {CARD_Y}, tgcx_bill_card_step = {CARD_STEP};",
               f"static constexpr int tgcx_bill_cb = {CB}, tgcx_bill_cc = {CC}, tgcx_bill_ce = {CE}, tgcx_bill_crown_y = {CROWN_Y};",
               "static constexpr int tgcx_bill_chart[] = {" + ",".join(map(str, CHART)) + "};",
               "static constexpr int tgcx_bill_chart_patch[] = {" + ",".join(map(str, CHART_PATCH)) + "};",
               "static constexpr int tgcx_bill_mode_x[] = {" + ",".join(map(str, MODE_X)) + f"}}, tgcx_bill_mode_y = {MODE_Y};",
-              "static constexpr int tgcx_bill_lot_x[] = {" + ",".join(map(str, LOT_X)) + f"}}, tgcx_bill_lot_y = {LOT_Y};",
               "static constexpr int tgcx_bill_legend_x[] = {" + ",".join(map(str, LEGEND_X)) + f"}}, tgcx_bill_legend_y = {LEGEND_Y};",
               f"static constexpr int tgcx_bill_atlas_size[] = {{{ATLAS_SIZE[0]},{ATLAS_SIZE[1]}}};",
               f"static constexpr int tgcx_bill_icon_y = {ICON_Y}, tgcx_bill_icon_cell = {ICON_CELL}, tgcx_bill_icon_columns = {ICON_COLUMNS};"]
     lines += [f"static constexpr int tgcx_bill_cell_{name}[] = {{{','.join(map(str, cell))}}};" for name, cell in CELLS.items()]
+    lines += characters_header(tgc, laws, affinity, groups, ideologies, chosen, boxes)
     lines += [f'static constexpr const char tgcx_bill_bg_file[] = "{BG}";',
               f'static constexpr const char tgcx_bill_atlas_file[] = "{ATLAS}";',
               "struct tgcx_BillButtonInfo { const char* name; short x, y, w, h; };",

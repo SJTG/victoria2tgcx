@@ -3,11 +3,14 @@
 //! each decision's own effect re-checks its conditions (R5; tools/gen_law_catalog.py).
 
 use std::ffi::c_void;
-use std::fmt::Write as _;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows_sys::Win32::Foundation::HMODULE;
+use windows_sys::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleFileNameW, GetModuleHandleExW,
+};
 
 use crate::bill_catalog::*;
 use crate::d3d::{self, Device, HResult, S_FALSE, S_OK, Viewport, succeeded};
@@ -130,8 +133,10 @@ pub struct BillTimers {
     pub debate: i32,
     pub tick: i32,
     pub cooldown: i32,
-    pub debt: [i32; IDEOLOGIES],
-    pub broken: [i32; IDEOLOGIES],
+    /// New bills are frozen until then (a deal asked for quiet).
+    pub freeze: i32,
+    /// Deadline of the law owed to each character (bloc * 2 + slot); 0 = none.
+    pub due: [i32; CHARS],
 }
 
 fn modifier_name(modifier: usize) -> Option<&'static [u8]> {
@@ -175,13 +180,13 @@ fn timers_inner(country: usize) -> Option<BillTimers> {
                 b"tgcx_debate" => out.debate = expiry,
                 b"tgcx_favours_tick" => out.tick = expiry,
                 b"tgcx_bill_cooldown" => out.cooldown = expiry,
+                b"tgcx_freeze" => out.freeze = expiry,
                 _ => {
                     for (i, ideology) in IDEOLOGY_CANDIDATES.iter().enumerate() {
-                        if name == text!(64, "tgcx_debt_deadline_{ideology}").bytes() {
-                            out.debt[i] = expiry;
-                        }
-                        if name == text!(64, "tgcx_debt_broken_{ideology}").bytes() {
-                            out.broken[i] = expiry;
+                        for s in 0..SLOTS {
+                            if name == text!(64, "tgcx_due_{ideology}_{s}").bytes() {
+                                out.due[i * SLOTS + s] = expiry;
+                            }
                         }
                     }
                 }
@@ -266,11 +271,32 @@ pub struct BillBloc {
     pub bought_yes: i32,
     pub opposed: i32,
     pub stance: i32,
-    pub promised: bool,
 }
 
-const RATE_PARTS: usize = 5;
-const RATE_NAMES: [&str; RATE_PARTS] = ["prestige", "house", "order", "franchise", "leader"];
+/// Characters per bloc: 0 = leader, 1 = cabecilla (D37).
+pub const SLOTS: usize = 2;
+pub const CHARS: usize = IDEOLOGIES * SLOTS;
+
+/// What one character shows and asks right now (all read from script variables).
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct CharState {
+    /// His five-seat packets of the bloc, and how many of those oppose the bill.
+    pub seats: i32,
+    pub opposed: i32,
+    /// His own stance on the bill, -2..2.
+    pub stance: i32,
+    /// Willingness to deal: 0 refuses, 1 hostile, 2 neutral, 3 friendly, 4 ally.
+    pub band: i32,
+    /// Personal relation with the player, 0..10.
+    pub relation: i32,
+    /// Deal made on this bill: 0 none, 1 abstain, 2 aye.
+    pub deal: i32,
+    /// Law owed to him (the ask that was accepted), 0 = none.
+    pub owe: i32,
+    /// Encoded asks (ASK_*) and deadlines in days for abstain / aye.
+    pub ask: [i32; 2],
+    pub days: [i32; 2],
+}
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub struct BillModel {
@@ -281,19 +307,18 @@ pub struct BillModel {
     pub abstain: i32,
     pub margin: i32,
     pub quorum: i32,
-    pub favours: i32,
-    pub rate: i32,
-    pub spent: i32,
     pub ticks: i32,
     pub ruling: i32,
     pub government: i32,
-    pub rate_part: [i32; RATE_PARTS],
+    /// The script has sounded the characters out for the current bill.
+    pub offers: bool,
     pub active: bool,
     pub audience: bool,
     pub crown_veto: bool,
     pub crown_signs: bool,
     pub valid: bool,
     pub bloc: [BillBloc; IDEOLOGIES],
+    pub chars: [CharState; CHARS],
 }
 
 /// A script variable in whole units (the engine stores thousandths).
@@ -330,21 +355,13 @@ pub fn read_model(country: usize) -> BillModel {
     out.no = v(format_args!("tgcx_no"), &mut ok);
     out.margin = v(format_args!("tgcx_margin"), &mut ok);
     out.quorum = v(format_args!("tgcx_quorum"), &mut ok);
-    out.favours = v(format_args!("tgcx_favours"), &mut ok);
-    out.rate = v(format_args!("tgcx_rate"), &mut ok);
-    out.spent = v(format_args!("tgcx_spent"), &mut ok);
+    out.offers = v(format_args!("tgcx_gui_offers"), &mut ok) == 1;
     out.ticks = v(format_args!("tgcx_favours_ticks"), &mut ok);
     out.ruling = v(format_args!("tgcx_gui_ruling"), &mut ok);
     out.government = v(format_args!("tgcx_gui_government"), &mut ok);
     out.audience = v(format_args!("tgcx_gui_crown_audience"), &mut ok) == 1;
     out.crown_veto = v(format_args!("tgcx_gui_crown_veto"), &mut ok) == 1;
     out.crown_signs = v(format_args!("tgcx_gui_crown_signs"), &mut ok) == 1;
-    for (p, name) in RATE_NAMES.iter().enumerate() {
-        out.rate_part[p] = v(format_args!("tgcx_gui_rate_{name}"), &mut ok);
-        if !(-8..=8).contains(&out.rate_part[p]) {
-            ok = false;
-        }
-    }
     let (mut sum, mut aye, mut nay) = (0, 0, 0);
     for (i, ideology) in IDEOLOGY_CANDIDATES.iter().enumerate() {
         let b = &mut out.bloc[i];
@@ -355,7 +372,6 @@ pub fn read_model(country: usize) -> BillModel {
         b.opposed = v(format_args!("tgcx_opposed_{ideology}"), &mut ok);
         b.bought = v(format_args!("tgcx_buy_{ideology}_total"), &mut ok);
         b.bought_yes = v(format_args!("tgcx_buy_{ideology}_yes"), &mut ok);
-        b.promised = v(format_args!("tgcx_gui_promised_{ideology}"), &mut ok) == 1;
         if !(0..=100).contains(&b.seats)
             || b.seats % 5 != 0
             || b.base < 0
@@ -373,11 +389,7 @@ pub fn read_model(country: usize) -> BillModel {
             ok = false;
         }
         let opposed = (b.seats - b.base).max(0);
-        b.abstain = if b.promised {
-            0
-        } else {
-            b.bought.min(opposed) - b.bought_yes.min(opposed)
-        };
+        b.abstain = b.bought.min(opposed) - b.bought_yes.min(opposed);
         b.yes = b.seats - b.no - b.abstain;
         if b.yes < 0 || b.yes > b.seats || b.abstain < 0 || b.abstain > b.seats {
             ok = false;
@@ -385,6 +397,43 @@ pub fn read_model(country: usize) -> BillModel {
         sum += b.seats;
         aye += b.yes;
         nay += b.no;
+        if b.seats == 0 || !out.offers {
+            continue;
+        }
+        // Characters are read only once the script has sounded them out; a bloc whose
+        // characters disagree with its seats just shows none (the next refresh fixes it).
+        let (mut seats, mut opposed) = (0, 0);
+        for slot in 0..SLOTS {
+            let c = &mut out.chars[i * SLOTS + slot];
+            c.seats = v(format_args!("tgcx_gui_cseats_{ideology}_{slot}"), &mut ok);
+            c.opposed = v(format_args!("tgcx_gui_copp_{ideology}_{slot}"), &mut ok);
+            c.stance = v(format_args!("tgcx_gui_cst_{ideology}_{slot}"), &mut ok);
+            c.band = v(format_args!("tgcx_gui_band_{ideology}_{slot}"), &mut ok);
+            c.relation = v(format_args!("tgcx_rel_{ideology}_{slot}"), &mut ok);
+            c.deal = v(format_args!("tgcx_deal_{ideology}_{slot}"), &mut ok);
+            c.owe = v(format_args!("tgcx_owe_{ideology}_{slot}"), &mut ok);
+            for (t, tier) in ["abstain", "aye"].iter().enumerate() {
+                c.ask[t] = v(format_args!("tgcx_gui_ask_{ideology}_{slot}_{tier}"), &mut ok);
+                c.days[t] = v(format_args!("tgcx_gui_days_{ideology}_{slot}_{tier}"), &mut ok);
+            }
+            seats += c.seats;
+            opposed += c.opposed;
+        }
+        let consistent = seats == b.seats && opposed == b.opposed;
+        for slot in 0..SLOTS {
+            let c = &mut out.chars[i * SLOTS + slot];
+            if !consistent
+                || c.seats % 5 != 0
+                || c.opposed % 5 != 0
+                || c.opposed > c.seats
+                || !(-2..=2).contains(&c.stance)
+                || !(0..=4).contains(&c.band)
+                || !(0..=10).contains(&c.relation)
+                || !(0..=2).contains(&c.deal)
+            {
+                *c = CharState::default();
+            }
+        }
     }
     out.abstain = 100 - out.yes - out.no;
     out.valid = ok
@@ -399,9 +448,6 @@ pub fn read_model(country: usize) -> BillModel {
         && out.quorum == out.yes + out.no
         && out.id >= 0
         && out.id <= BILL_CATALOG.len() as i32
-        && (0..=100).contains(&out.favours)
-        && (0..=8).contains(&out.rate)
-        && out.spent >= 0
         && out.ticks >= 0
         && out.ruling >= 0
         && out.ruling <= IDEOLOGIES as i32
@@ -414,12 +460,11 @@ pub fn read_model(country: usize) -> BillModel {
 
 const CARDS: usize = BILL_CARDS as usize;
 
-/// One button: the decision it sends, its price and whether it is shown/usable.
+/// One button: the decision it sends and whether it is shown/usable.
 /// The DLL only greys out what the script would refuse; the script decides.
 #[derive(Clone, Copy, Default)]
 pub struct BillAction {
     decision: Text<64>,
-    price: i32,
     visible: bool,
     enabled: bool,
 }
@@ -434,6 +479,7 @@ pub struct BillCardPlan {
 #[derive(Clone, Copy, Default)]
 pub struct BillView {
     slots: usize,
+    /// The character each card shows (bloc * SLOTS + slot).
     slot: [usize; CARDS],
     pages: u32,
     page: u32,
@@ -444,76 +490,72 @@ pub struct BillView {
     vote: BillAction,
 }
 
-fn action(decision: &str, price: i32, visible: bool, enabled: bool) -> BillAction {
+fn action(decision: &str, visible: bool, enabled: bool) -> BillAction {
     BillAction {
         decision: Text::from_latin1(decision),
-        price,
         visible,
         enabled,
     }
 }
 
-fn price(table: &[i32; 5], stance: i32, lot: i32, broken: bool) -> i32 {
-    table[(stance + 2) as usize] * lot / 5 * if broken { BILL_BROKEN_FACTOR } else { 1 }
+/// The bloc and slot of a character index.
+fn who(c: usize) -> (usize, usize) {
+    (c / SLOTS, c % SLOTS)
 }
 
-fn plan_card(m: &BillModel, t: &BillTimers, i: usize, lot: i32) -> BillCardPlan {
+fn plan_card(m: &BillModel, c: usize) -> BillCardPlan {
     let mut out = BillCardPlan::default();
-    let b = &m.bloc[i];
-    let code = BILL_STANCE_CODES[(b.stance + 2) as usize];
-    let broken = t.broken[i] != 0;
+    let ch = &m.chars[c];
+    let (i, slot) = who(c);
     if m.id == 0 {
         out.note = Some("Count the votes to identify this bill.");
         return out;
     }
-    if b.promised {
-        out.b = action("", 0, true, false);
+    if !m.offers {
+        out.note = Some("Sounding him out...");
         return out;
     }
-    let suffix = if lot == 25 { "_25" } else { "" };
-    let twin = if broken { "_x2" } else { "" };
-    let ideology = IDEOLOGY_CANDIDATES[i];
-    if b.stance <= -1 && b.no > 0 {
-        let a = &mut out.a;
-        a.visible = true;
-        a.price = price(&BILL_ABSTAIN_PRICE, b.stance, lot, broken);
-        a.decision = text!(64, "tgcx_buy_abstain_{ideology}_{code}{suffix}{twin}");
-        a.enabled = m.favours >= a.price && b.no >= lot;
-    }
-    if b.stance == -2 {
-        // Securing every opposing seat needs one not already bought to vote Aye.
-        let p = &mut out.b;
-        p.visible = true;
-        p.decision = text!(64, "tgcx_promise_{ideology}");
-        p.enabled = (!t.known || t.debt[i] == 0) && b.opposed > b.bought_yes;
-    } else if b.no > 0 {
-        let v = &mut out.b;
-        v.visible = true;
-        v.price = price(&BILL_AYE_PRICE, b.stance, lot, broken);
-        v.decision = text!(64, "tgcx_buy_vote_{ideology}_{code}{suffix}{twin}");
-        v.enabled = m.favours >= v.price && b.no >= lot;
-    }
-    if !out.a.visible && !out.b.visible {
-        out.note = Some(if b.yes == b.seats {
-            "Votes Aye on its own: nothing to buy."
+    if ch.deal != 0 {
+        out.note = Some(if ch.deal == 1 {
+            "Deal made: his followers abstain."
         } else {
-            "No seats left to buy."
+            "Deal made: his followers vote Aye."
         });
+        return out;
+    }
+    if ch.opposed == 0 {
+        out.note = Some("None of his followers oppose the bill.");
+        return out;
+    }
+    if ch.band == 0 {
+        out.note = Some("Refuses to deal with you.");
+        return out;
+    }
+    let ideology = IDEOLOGY_CANDIDATES[i];
+    for (t, tier) in ["abstain", "aye"].iter().enumerate() {
+        let ask = ch.ask[t];
+        let open = ask >= BILL_ASK_FREE && (ask < BILL_ASK_LAW || ch.owe == 0);
+        let button = action(&format!("tgcx_deal_{tier}_{ideology}_{slot}"), true, open);
+        if t == 0 {
+            out.a = button;
+        } else {
+            out.b = button;
+        }
     }
     out
 }
 
-/// Sort keys (header buttons): 0 seats, 1 most opposed first, 2 most friendly first
-/// (the board's order), 3 most Nay. Clicking the active key pages on.
+/// Sort keys (header buttons): 0 his seats, 1 closeness (band), 2 most friendly stance first,
+/// 3 most opposed seats. Clicking the active key pages on.
 fn order(m: &BillModel, sort: i32) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..IDEOLOGIES).filter(|&i| m.bloc[i].seats != 0).collect();
-    let key = |i: usize| {
-        let b = &m.bloc[i];
+    let mut order: Vec<usize> = (0..CHARS).filter(|&c| m.chars[c].seats != 0).collect();
+    let key = |c: usize| {
+        let ch = &m.chars[c];
         match sort {
-            1 => -b.stance,
-            2 => b.stance,
-            3 => b.no,
-            _ => b.seats,
+            1 => ch.band,
+            2 => ch.stance,
+            3 => ch.opposed,
+            _ => ch.seats,
         }
     };
     for x in 1..order.len() {
@@ -521,8 +563,8 @@ fn order(m: &BillModel, sort: i32) -> Vec<usize> {
             let (p, q) = (order[y - 1], order[y]);
             let swap = key(q) > key(p)
                 || (key(q) == key(p)
-                    && (m.bloc[q].seats > m.bloc[p].seats
-                        || (m.bloc[q].seats == m.bloc[p].seats && q < p)));
+                    && (m.chars[q].seats > m.chars[p].seats
+                        || (m.chars[q].seats == m.chars[p].seats && q < p)));
             if !swap {
                 break;
             }
@@ -533,7 +575,7 @@ fn order(m: &BillModel, sort: i32) -> Vec<usize> {
     order
 }
 
-fn build_view(m: &BillModel, t: &BillTimers, sort: i32, page: u32, lot: i32) -> BillView {
+fn build_view(m: &BillModel, t: &BillTimers, sort: i32, page: u32) -> BillView {
     let mut out = BillView::default();
     let order = order(m, sort);
     let n = order.len();
@@ -546,17 +588,16 @@ fn build_view(m: &BillModel, t: &BillTimers, sort: i32, page: u32, lot: i32) -> 
         }
         out.slot[s] = order[first + s];
         out.slots += 1;
-        out.card[s] = plan_card(m, t, out.slot[s], lot);
+        out.card[s] = plan_card(m, out.slot[s]);
     }
     out.audience = action(
         "tgcx_audience",
-        BILL_AUDIENCE_PRICE,
         m.crown_veto,
-        m.crown_veto && m.id > 0 && !m.audience && m.favours >= BILL_AUDIENCE_PRICE,
+        m.crown_veto && m.id > 0 && !m.audience,
     );
-    out.count = action("tgcx_count_votes", 0, true, true);
-    out.withdraw = action("tgcx_withdraw", 0, true, true);
-    out.vote = action("tgcx_call_vote", 0, true, !t.known || t.debate == 0);
+    out.count = action("tgcx_count_votes", true, true);
+    out.withdraw = action("tgcx_withdraw", true, true);
+    out.vote = action("tgcx_call_vote", true, !t.known || t.debate == 0);
     out
 }
 
@@ -589,7 +630,6 @@ pub struct Bill {
     timers: BillTimers,
     view: BillView,
     mode: i32,
-    lot: i32,
     sort: i32,
     page: u32,
     glue: [[u8; 44]; ACTIONS],
@@ -625,13 +665,10 @@ pub static BILL: Global<Bill> = Global::new(Bill {
         abstain: 0,
         margin: 0,
         quorum: 0,
-        favours: 0,
-        rate: 0,
-        spent: 0,
         ticks: 0,
         ruling: 0,
         government: 0,
-        rate_part: [0; RATE_PARTS],
+        offers: false,
         active: false,
         audience: false,
         crown_veto: false,
@@ -647,16 +684,26 @@ pub static BILL: Global<Bill> = Global::new(Bill {
             bought_yes: 0,
             opposed: 0,
             stance: 0,
-            promised: false,
         }; IDEOLOGIES],
+        chars: [CharState {
+            seats: 0,
+            opposed: 0,
+            stance: 0,
+            band: 0,
+            relation: 0,
+            deal: 0,
+            owe: 0,
+            ask: [0; 2],
+            days: [0; 2],
+        }; CHARS],
     },
     timers: BillTimers {
         known: false,
         debate: 0,
         tick: 0,
         cooldown: 0,
-        debt: [0; IDEOLOGIES],
-        broken: [0; IDEOLOGIES],
+        freeze: 0,
+        due: [0; CHARS],
     },
     view: BillView {
         slots: 0,
@@ -674,8 +721,7 @@ pub static BILL: Global<Bill> = Global::new(Bill {
         vote: EMPTY_ACTION,
     },
     mode: 2,
-    lot: 25,
-    sort: 2,
+    sort: 3,
     page: 0,
     glue: [[0; 44]; ACTIONS],
     bound: [false; ACTIONS],
@@ -690,7 +736,6 @@ pub static BILL: Global<Bill> = Global::new(Bill {
 
 const EMPTY_ACTION: BillAction = BillAction {
     decision: Text::new(),
-    price: 0,
     visible: false,
     enabled: false,
 };
@@ -717,54 +762,101 @@ fn log_line(hours: u32, text: &str) {
     b.log_count += 1;
 }
 
-fn observe(old: &BillModel, now: &BillModel, timers: &BillTimers, hours: u32) {
-    let mut favours = now.spent - old.spent;
-    let mut price = || -> String {
-        if favours <= 0 {
-            return String::new();
+/// A character's name: the hand-written one of the player's country, else his role in the bloc.
+fn char_name(tag: &[u8], c: usize) -> Text<64> {
+    let (i, slot) = who(c);
+    for ch in BILL_CHARS.iter() {
+        if ch.bloc as usize == i && ch.slot as usize == slot && ch.tag.as_bytes() == tag {
+            return Text::from_latin1(ch.card_name);
         }
-        let cost = format!(" ({favours} favour{})", if favours == 1 { "" } else { "s" });
-        favours = 0;
-        cost
-    };
-    for i in 0..IDEOLOGIES {
-        let (a, b) = (&old.bloc[i], &now.bloc[i]);
-        if b.promised && !a.promised {
-            let due = if timers.debt[i] != 0 {
-                date(timers.debt[i], false).to_string()
-            } else {
-                String::new()
-            };
-            let before = if due.is_empty() { "" } else { " before " };
-            log_line(
-                hours,
-                &format!(
-                    "{} promised a law of their choice{before}{due}.",
-                    BILL_BLOC_NAMES[i]
-                ),
+    }
+    text!(
+        64,
+        "{} {}",
+        BILL_BLOC_SINGULAR[i],
+        if slot == 0 { "leader" } else { "cabecilla" }
+    )
+}
+
+/// "Press Rights" from the group's key.
+fn group_title(g: usize) -> Text<48> {
+    let mut out = Text::<48>::new();
+    let mut start = true;
+    for c in BILL_GROUP_KEYS[g].chars() {
+        if c == '_' {
+            out.push_bytes(b" ");
+            start = true;
+        } else {
+            let c = if start { c.to_ascii_uppercase() } else { c };
+            let mut buf = [0u8; 4];
+            out.push_bytes(c.encode_utf8(&mut buf).as_bytes());
+            start = false;
+        }
+    }
+    out
+}
+
+/// What an encoded ask means in words: "Free Press for Press Rights in 90 days".
+fn ask_text(ask: i32, days: i32) -> Text<96> {
+    if ask >= BILL_ASK_LAW {
+        let (g, rest) = ((ask - BILL_ASK_LAW) / 64, (ask - BILL_ASK_LAW) % 64);
+        let target = (rest / 8) as usize;
+        if let Some(group) = BILL_GROUPS.get(g as usize)
+            && target < group.count as usize
+        {
+            return text!(
+                96,
+                "{}: {} in {days} days",
+                group_title(g as usize),
+                group.short_options[target]
             );
+        }
+        return text!(96, "a law of his choice in {days} days");
+    }
+    if ask == BILL_ASK_FREEZE {
+        return text!(96, "no new bills for {days} days");
+    }
+    if ask == BILL_ASK_FREE {
+        return text!(96, "nothing");
+    }
+    Text::new()
+}
+
+fn observe(old: &BillModel, now: &BillModel, timers: &BillTimers, tag: &[u8], hours: u32) {
+    let _ = timers;
+    if !old.offers || !now.offers {
+        return;
+    }
+    for c in 0..CHARS {
+        let (a, b) = (&old.chars[c], &now.chars[c]);
+        if b.seats == 0 {
             continue;
         }
-        let abstain = (b.bought - b.bought_yes) - (a.bought - a.bought_yes);
-        let aye = b.bought_yes - a.bought_yes;
-        if abstain > 0 {
-            let p = price();
+        let name = char_name(tag, c);
+        if b.deal != a.deal && b.deal != 0 {
+            let how = if b.deal == 1 {
+                "abstain"
+            } else {
+                "vote Aye"
+            };
+            let ask = ask_text(b.ask[(b.deal - 1) as usize], b.days[(b.deal - 1) as usize]);
             log_line(
                 hours,
-                &format!("{abstain} {} seats will abstain{p}.", BILL_BLOC_SINGULAR[i]),
+                &format!("{name}'s followers will {how}; he asks: {ask}."),
             );
         }
-        if aye > 0 {
-            let p = price();
+        if a.owe != 0 && b.owe == 0 && b.deal != 0 {
+            log_line(hours, &format!("{name} got what he asked for."));
+        }
+        if b.relation != a.relation {
             log_line(
                 hours,
-                &format!("{aye} {} seats will vote Aye{p}.", BILL_BLOC_SINGULAR[i]),
+                &format!("Relation with {name}: {} to {}.", a.relation, b.relation),
             );
         }
     }
     if now.audience && !old.audience {
-        let p = price();
-        log_line(hours, &format!("The Crown granted an audience{p}."));
+        log_line(hours, "The Crown granted an audience.");
     }
 }
 
@@ -935,16 +1027,12 @@ fn click_inner(action: usize) {
         b.mode = (action - B_MODE_0) as i32;
         return;
     }
-    if action == B_LOT_0 || action == B_LOT_1 {
-        b.lot = if action == B_LOT_0 { 5 } else { 25 };
-        return;
-    }
-    let view = build_view(&fresh, &timers, b.sort, b.page, b.lot);
+    let view = build_view(&fresh, &timers, b.sort, b.page);
     let tag = sample.tag();
     if (B_CARD_0_A..=B_CARD_2_B).contains(&action) {
         let slot = (action - B_CARD_0_A) / 2;
         let second = !(action - B_CARD_0_A).is_multiple_of(2);
-        // A card that now shows another bloc was stale: refresh, send nothing.
+        // A card that now shows another character was stale: refresh, send nothing.
         if slot >= view.slots || b.view.slots == 0 || view.slot[slot] != b.view.slot[slot] {
             return;
         }
@@ -1058,8 +1146,7 @@ fn option_window(law: &BillInfo) -> (usize, &'static BillGroup) {
     (start, g)
 }
 
-fn labels(m: &BillModel, t: &BillTimers, v: &BillView) {
-    let lot = BILL.get().lot;
+fn labels(m: &BillModel, t: &BillTimers, v: &BillView, tag: &[u8]) {
     let law = (m.id > 0).then(|| &BILL_CATALOG[(m.id - 1) as usize]);
     puts(T_LAW, law.map_or("Active bill", |l| l.title));
     // A transition too wide for vic_18 goes to the Arial12 bold line in the same place.
@@ -1099,89 +1186,76 @@ fn labels(m: &BillModel, t: &BillTimers, v: &BillView) {
         }
     }
     if v.pages > 1 {
-        putf(T_SORT_0, format_args!("Bloc {}/{}", v.page + 1, v.pages));
+        putf(T_SORT_0, format_args!("Leader {}/{}", v.page + 1, v.pages));
     } else {
-        puts(T_SORT_0, "Bloc");
+        puts(T_SORT_0, "Leader");
     }
     putf(T_LEGEND_0, format_args!("{} Aye", m.yes));
     putf(T_LEGEND_1, format_args!("{} Abstain", m.abstain));
     putf(T_LEGEND_2, format_args!("{} Nay", m.no));
-    puts(T_CHART_NOTE, "TGC starting votes + negotiated seats.");
-    putf(T_FAVOURS, format_args!("{}", m.favours));
-    putf(T_RATE, format_args!("\u{A7}G+{} per month\u{A7}!", m.rate));
-    putf(T_SPENT, format_args!("Spent on this bill: {}", m.spent));
-    let sources: Vec<&str> = (0..RATE_PARTS)
-        .filter(|&p| m.rate_part[p] > 0)
-        .map(|p| RATE_NAMES[p])
-        .collect();
-    if sources.is_empty() {
-        puts(T_SOURCES, "From the base rate");
-    } else {
-        putf(T_SOURCES, format_args!("From {}", sources.join(", ")));
+    puts(T_CHART_NOTE, "TGC starting votes + deals made.");
+    // What they ask: three lines per visible card.
+    for n in 0..CARDS {
+        let at = |field: usize| T_ASK_0_NAME + n * (T_ASK_1_NAME - T_ASK_0_NAME) + field;
+        if n >= v.slots {
+            for f in 0..3 {
+                puts(at(f), "");
+            }
+            continue;
+        }
+        let c = v.slot[n];
+        let ch = &m.chars[c];
+        if m.offers {
+            // Why he asks what he asks: his band comes from the relation (and his stance on this bill).
+            putf(
+                at(0),
+                format_args!(
+                    "{} - {}, relation {}/10",
+                    char_name(tag, c),
+                    BILL_BAND_NAMES[ch.band as usize],
+                    ch.relation
+                ),
+            );
+        } else {
+            putf(at(0), format_args!("{}", char_name(tag, c)));
+        }
+        let plan = &v.card[n];
+        if !plan.a.visible && !plan.b.visible {
+            puts(at(1), plan.note.unwrap_or(""));
+            puts(at(2), "");
+            continue;
+        }
+        putf(at(1), format_args!("Abstain: {}", ask_text(ch.ask[0], ch.days[0])));
+        putf(at(2), format_args!("Aye: {}", ask_text(ch.ask[1], ch.days[1])));
     }
-    // Price table at the chosen lot (catalogue friendly Aye = the undecided price).
-    puts(T_TABLE_1_ABSTAIN, "\u{96}");
-    putf(
-        T_TABLE_1_AYE,
-        format_args!("{}", price(&BILL_AYE_PRICE, 0, lot, false)),
-    );
-    putf(
-        T_TABLE_2_ABSTAIN,
-        format_args!("{}", price(&BILL_ABSTAIN_PRICE, -1, lot, false)),
-    );
-    putf(
-        T_TABLE_2_AYE,
-        format_args!("{}", price(&BILL_AYE_PRICE, -1, lot, false)),
-    );
-    putf(
-        T_TABLE_3_ABSTAIN,
-        format_args!("{}", price(&BILL_ABSTAIN_PRICE, -2, lot, false)),
-    );
-    puts(T_TABLE_3_AYE, "promise");
-    // Debts: one entry in the board's long form, several one line each.
-    let mut lines: [Text<64>; 4] = [Text::new(); 4];
+    puts(T_ASK_NOTE, if m.offers { "The closer he is to you, the less he asks." } else { "" });
+    // Debts: the laws owed to characters, with their deadlines.
     let mut count = 0;
-    let entries: usize = (0..IDEOLOGIES)
-        .map(|i| usize::from(t.debt[i] != 0) + usize::from(t.broken[i] != 0))
-        .sum();
-    for i in 0..IDEOLOGIES {
-        if count >= 4 {
-            break;
-        }
-        if t.debt[i] != 0 {
-            let d = date(t.debt[i], false);
-            if entries == 1 {
-                lines[0] = text!(64, "{}: enact a law they want", BILL_BLOC_NAMES[i]);
-                lines[1] = text!(64, "before {d}. If not: +{BILL_BROKEN_MILITANCY}");
-                lines[2] = text!(64, "militancy in their pops, and their");
-                lines[3] = text!(64, "votes cost double for {BILL_BROKEN_YEARS} years.");
-                count = 4;
-            } else {
-                lines[count] = text!(64, "{}: law owed before {d}", BILL_BLOC_NAMES[i]);
-                count += 1;
-            }
-        }
-        if t.broken[i] != 0 && count < 4 {
-            let d = date(t.broken[i], false);
-            if entries == 1 {
-                lines[0] = text!(64, "{}: a promise was broken.", BILL_BLOC_NAMES[i]);
-                lines[1] = text!(64, "Their votes cost double until {d}.");
-                count = 2;
-            } else {
-                lines[count] = text!(64, "{}: double price until {d}", BILL_BLOC_NAMES[i]);
-                count += 1;
-            }
-        }
-    }
+    let mut lines: [Text<64>; 4] = [Text::new(); 4];
     if !t.known {
         lines[0] = text!(64, "Debts are listed under Decisions.");
-    } else if entries == 0 {
-        lines[0] = text!(64, "No promises owed.");
+    } else {
+        for c in 0..CHARS {
+            if count >= 4 {
+                break;
+            }
+            if t.due[c] != 0 {
+                lines[count] = text!(64, "{}: law owed before {}", char_name(tag, c), date(t.due[c], false));
+                count += 1;
+            }
+        }
+        if t.freeze != 0 && count < 4 {
+            lines[count] = text!(64, "No new bills until {}", date(t.freeze, false));
+            count += 1;
+        }
+        if count == 0 {
+            lines[0] = text!(64, "Nothing owed.");
+        }
     }
     for (l, line) in lines.iter().enumerate() {
         put(T_DEBT_0 + l, line.bytes());
     }
-    // Bloc cards.
+    // Character cards.
     let stride = T_CARD_1_NAME - T_CARD_0_NAME;
     for s in 0..CARDS {
         let at = |field: usize| T_CARD_0_NAME + s * stride + field - T_CARD_0_NAME;
@@ -1191,15 +1265,13 @@ fn labels(m: &BillModel, t: &BillTimers, v: &BillView) {
             }
             continue;
         }
-        let i = v.slot[s];
-        let b = &m.bloc[i];
-        let c = &v.card[s];
+        let c = v.slot[s];
+        let (i, _) = who(c);
+        let ch = &m.chars[c];
+        let plan = &v.card[s];
         puts(at(T_CARD_0_NAME), BILL_BLOC_SINGULAR[i]);
-        putf(at(T_CARD_0_SEATS), format_args!("{} seats", b.seats));
-        putf(
-            at(T_CARD_0_NATIVE),
-            format_args!("TGC: {} Aye, {} Nay", b.base, b.seats - b.base),
-        );
+        putf(at(T_CARD_0_SEATS), format_args!("{} seats", ch.seats));
+        putf(at(T_CARD_0_NATIVE), format_args!("{}", char_name(tag, c)));
         for r in 0..3 {
             let mut option = "";
             if let Some(law) = law {
@@ -1217,67 +1289,44 @@ fn labels(m: &BillModel, t: &BillTimers, v: &BillView) {
             "+1",
             "+2, strongly",
         ];
-        if b.promised {
-            puts(at(T_CARD_0_STANCE), "\u{A7}GPromised\u{A7}!");
-            puts(at(T_CARD_0_STANCE_NOTE), "law owed");
+        if m.id == 0 || !m.offers {
+            puts(at(T_CARD_0_STANCE), if m.id == 0 { "Count" } else { "..." });
+            puts(at(T_CARD_0_STANCE_NOTE), "");
         } else {
-            let stance = if m.id == 0 {
-                "Count"
-            } else if b.stance > 0 {
-                "\u{A7}GFor\u{A7}!"
-            } else if b.stance < 0 {
-                "\u{A7}RAgainst\u{A7}!"
-            } else {
-                "Undecided"
-            };
-            puts(at(T_CARD_0_STANCE), stance);
             puts(
-                at(T_CARD_0_STANCE_NOTE),
-                if m.id != 0 {
-                    STANCE_NOTE[(b.stance + 2) as usize]
+                at(T_CARD_0_STANCE),
+                if ch.stance > 0 {
+                    "\u{A7}GFor\u{A7}!"
+                } else if ch.stance < 0 {
+                    "\u{A7}RAgainst\u{A7}!"
                 } else {
-                    ""
+                    "Undecided"
                 },
             );
+            puts(at(T_CARD_0_STANCE_NOTE), STANCE_NOTE[(ch.stance + 2) as usize]);
         }
-        putf(
-            at(T_CARD_0_AYE),
-            format_args!("\u{A7}G{} Aye\u{A7}!", b.yes),
-        );
-        putf(at(T_CARD_0_ABSTAIN), format_args!("{} Abstain", b.abstain));
-        putf(at(T_CARD_0_NAY), format_args!("\u{A7}R{} Nay\u{A7}!", b.no));
-        puts(at(T_CARD_0_BOUGHT_LABEL), "Bought");
-        if b.promised {
-            puts(at(T_CARD_0_BOUGHT), "a promise");
-        } else if b.bought != 0 {
+        // His followers' votes: what already supports the bill, plus what a deal moved.
+        let support = ch.seats - ch.opposed;
+        let (yes, abstain, no) = match ch.deal {
+            1 => (support, ch.opposed, 0),
+            2 => (support + ch.opposed, 0, 0),
+            _ => (support, 0, ch.opposed),
+        };
+        putf(at(T_CARD_0_AYE), format_args!("\u{A7}G{yes} Aye\u{A7}!"));
+        putf(at(T_CARD_0_ABSTAIN), format_args!("{abstain} Abstain"));
+        putf(at(T_CARD_0_NAY), format_args!("\u{A7}R{no} Nay\u{A7}!"));
+        puts(at(T_CARD_0_BOUGHT_LABEL), "Relation");
+        if m.offers {
             putf(
                 at(T_CARD_0_BOUGHT),
-                format_args!("{} abstain, {} aye", b.bought - b.bought_yes, b.bought_yes),
+                format_args!("{}/10, {}", ch.relation, BILL_BAND_NAMES[ch.band as usize]),
             );
         } else {
-            puts(
-                at(T_CARD_0_BOUGHT),
-                if b.no != 0 {
-                    "nothing yet"
-                } else {
-                    "nothing needed"
-                },
-            );
+            puts(at(T_CARD_0_BOUGHT), "");
         }
-        puts(at(T_CARD_0_NOTE), c.note.unwrap_or(""));
-        button_label(
-            at(T_CARD_0_A),
-            &c.a,
-            &format!("Abstain {lot} ({})", c.a.price),
-        );
-        let label = if b.promised {
-            "Law promised".to_string()
-        } else if b.stance == -2 {
-            "Promise a law".to_string()
-        } else {
-            format!("Aye {lot} ({})", c.b.price)
-        };
-        button_label(at(T_CARD_0_B), &c.b, &label);
+        puts(at(T_CARD_0_NOTE), plan.note.unwrap_or(""));
+        button_label(at(T_CARD_0_A), &plan.a, "Abstain");
+        button_label(at(T_CARD_0_B), &plan.b, "Aye");
     }
     // The Crown.
     let government = if m.government > 0 {
@@ -1350,11 +1399,7 @@ fn labels(m: &BillModel, t: &BillTimers, v: &BillView) {
             "not asked"
         },
     );
-    button_label(
-        T_AUDIENCE,
-        &v.audience,
-        &format!("Audience ({BILL_AUDIENCE_PRICE})"),
-    );
+    button_label(T_AUDIENCE, &v.audience, "Audience");
     let b = BILL.get();
     for l in 0..4 {
         let line = if l < b.log_count {
@@ -1455,8 +1500,9 @@ fn tick_inner() {
             b.page = 0;
         }
     } else {
-        observe(&old, &model, &timers, sample.date_hours);
+        observe(&old, &model, &timers, sample.tag().0, sample.date_hours);
     }
+    refresh_offers(&model);
     let b = BILL.get();
     let changed = b.dirty || !old.valid || old != model || b.timers != timers;
     b.model = model;
@@ -1466,14 +1512,58 @@ fn tick_inner() {
     }
     b.was_active = true;
     if changed {
-        b.view = build_view(&model, &timers, b.sort, b.page, b.lot);
+        b.view = build_view(&model, &timers, b.sort, b.page);
         b.page = b.view.page;
         b.dirty = false;
         let view = b.view;
-        labels(&model, &timers, &view);
+        labels(&model, &timers, &view, sample.tag().0);
     }
     let b = BILL.get();
     visibility(b.open && gui.width >= BILL_WIDTH && gui.height >= BILL_HEIGHT);
+}
+
+/// The script sounds the characters out for the current bill (what each asks, how much
+/// of the bloc he leads) only when a decision runs it, so the DLL sends it when a bill is
+/// identified and whenever the shown seats stopped matching the chamber. Every few seconds
+/// at most; the decision does nothing when there is no bill.
+static OFFERS_SENT: AtomicU32 = AtomicU32::new(0);
+
+fn refresh_offers(model: &BillModel) {
+    // A bill decision no longer carries its own count (it made the script 33 MB): an active bill
+    // with no id is counted by the DLL, with the same decision the Count button sends.
+    if model.active && model.id == 0 {
+        let now = crate::sys::tick();
+        let last = OFFERS_SENT.load(Ordering::SeqCst);
+        if last == 0 || now.wrapping_sub(last) >= 1500 {
+            OFFERS_SENT.store(now.max(1), Ordering::SeqCst);
+            if dispatch(b"tgcx_count_votes") {
+                BILL.get().dirty = true;
+                log!("Bill counted the new bill's votes");
+            }
+        }
+        return;
+    }
+    if model.id == 0 {
+        return;
+    }
+    let stale = !model.offers
+        || (0..IDEOLOGIES).any(|i| {
+            model.bloc[i].seats != 0
+                && model.chars[i * SLOTS].seats + model.chars[i * SLOTS + 1].seats == 0
+        });
+    if !stale {
+        return;
+    }
+    let now = crate::sys::tick();
+    let last = OFFERS_SENT.load(Ordering::SeqCst);
+    if last != 0 && now.wrapping_sub(last) < 3000 {
+        return;
+    }
+    OFFERS_SENT.store(now.max(1), Ordering::SeqCst);
+    if dispatch(b"tgcx_refresh_offers") {
+        BILL.get().dirty = true;
+        log!("Bill asked the script to sound out the characters");
+    }
 }
 
 pub fn tick() {
@@ -1696,25 +1786,51 @@ fn texture_from_dds(device: Device, data: &[u8]) -> Option<BillTexture> {
     })
 }
 
-fn load_texture(device: Device, file: &str) -> Option<BillTexture> {
+/// Folder this DLL was loaded from (the `-mod=` package folder, MOD-2), as UTF-16-lossy text.
+fn dll_folder() -> Option<String> {
+    let mut module: HMODULE = std::ptr::null_mut();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if unsafe { GetModuleHandleExW(flags, dll_folder as *const () as *const u16, &mut module) } == 0 {
+        return None;
+    }
     let mut path = [0u16; 260];
-    let count =
-        unsafe { GetModuleFileNameW(std::ptr::null_mut(), path.as_mut_ptr(), 260) } as usize;
+    let count = unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), 260) } as usize;
     if count == 0 || count >= 260 {
         return None;
     }
     let slash = path[..count].iter().rposition(|&c| c == u16::from(b'\\'))?;
-    let mut full = String::from_utf16_lossy(&path[..slash]);
-    write!(full, "\\mod\\TGCX\\gfx\\interface\\{file}").ok()?;
-    if full.len() >= 260 {
-        return None;
+    Some(String::from_utf16_lossy(&path[..slash]))
+}
+
+fn load_texture(device: Device, file: &str) -> Option<BillTexture> {
+    // The art sits in the package that holds tgcx.dll; the old `mod\TGCX` folder is the fallback.
+    let mut candidates = Vec::new();
+    if let Some(folder) = dll_folder() {
+        candidates.push(format!("{folder}\\gfx\\interface\\{file}"));
     }
-    let metadata = std::fs::metadata(&full).ok()?;
-    if metadata.len() > 64 << 20 {
-        return None;
+    let mut path = [0u16; 260];
+    let count =
+        unsafe { GetModuleFileNameW(std::ptr::null_mut(), path.as_mut_ptr(), 260) } as usize;
+    if count > 0 && count < 260 {
+        if let Some(slash) = path[..count].iter().rposition(|&c| c == u16::from(b'\\')) {
+            let exe = String::from_utf16_lossy(&path[..slash]);
+            candidates.push(format!("{exe}\\mod\\TGCX\\gfx\\interface\\{file}"));
+        }
     }
-    let data = std::fs::read(&full).ok()?;
-    texture_from_dds(device, &data)
+    for full in candidates {
+        if full.len() >= 260 {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&full) else { continue };
+        if metadata.len() > 64 << 20 {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&full) else { continue };
+        if let Some(texture) = texture_from_dds(device, &data) {
+            return Some(texture);
+        }
+    }
+    None
 }
 
 fn release_textures() {
@@ -1980,7 +2096,7 @@ fn draw_bill_chart(
     }
     button(&mut c, B_AUDIENCE, &view.audience);
     button(&mut c, B_VOTE, &view.vote);
-    let (mode, lot) = (BILL.get().mode, BILL.get().lot);
+    let mode = BILL.get().mode;
     for n in 0..3 {
         if n as i32 == mode {
             c.set(|| {
@@ -1994,15 +2110,6 @@ fn draw_bill_chart(
             });
         }
     }
-    c.set(|| {
-        cell(
-            device,
-            &BILL_CELL_CHECKED,
-            fx(BILL_LOT_X[usize::from(lot == 25)]),
-            fy(BILL_LOT_Y),
-            WHITE,
-        )
-    });
     let law = (model.id > 0).then(|| &BILL_CATALOG[(model.id - 1) as usize]);
     if let Some(law) = law {
         let size = BILL_ICON_CELL;
@@ -2029,7 +2136,7 @@ fn draw_bill_chart(
         let (start, g) = option_window(law);
         for s in 0..view.slots {
             let y0 = BILL_CARD_Y + BILL_CARD_STEP * s as i32;
-            let i = view.slot[s];
+            let i = who(view.slot[s]).0;
             c.set(|| {
                 cell(
                     device,

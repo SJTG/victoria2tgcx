@@ -44,10 +44,23 @@ class BillGuiTests(unittest.TestCase):
         self.assertTrue(all(k.startswith("tgcx_") for k in loc))
         self.assertTrue(all(";" not in text for text in loc.values()))
         self.assertNotIn("replace_path", fragment)
-        # Board numbers the DLL relies on (R10): price table, debts, lots.
-        self.assertIn("tgcx_bill_abstain_price[] = {5,2,0,0,0}", header)
-        self.assertIn("tgcx_bill_aye_price[] = {0,5,2,2,2}", header)
-        self.assertIn("tgcx_bill_broken_years = 10", header)
+        # The negotiation is made of characters (D37-D43): no prices, lots or promises.
+        text = header
+        for gone in ("abstain_price", "aye_price", "broken_years", "lot_x", "audience_price", "favours"):
+            self.assertNotIn(gone, text)
+        self.assertIn("tgcx_bill_ask_free = 1, tgcx_bill_ask_freeze = 2, tgcx_bill_ask_law = 3", text)
+        self.assertIn('"Refuses to deal","Hostile","Neutral","Friendly","Ally"', text)
+
+    def test_characters_table_has_the_hand_written_ones_and_a_sentinel(self):
+        header = catalogue_header()
+        table = header[header.index("tgcx_bill_chars[]"):]
+        table = table[:table.index("};")]
+        rows = [r for r in table.split("\n    {")[1:]]
+        names = [r.split('"')[3] for r in rows]
+        self.assertEqual(names[:3], ["Duke of Wellington", "Sir Robert Peel", "Viscount Melbourne"])
+        self.assertEqual(names[-1], "")                                   # sentinel
+        self.assertIn("tgcx_bill_char_groups = 23", header)
+        self.assertEqual(table.count("{255,255,255") >= 3, True)
 
     def test_layout_matches_the_header_and_draw_order(self):
         fragment, _ = layout()

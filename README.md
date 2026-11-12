@@ -33,7 +33,7 @@ The internal `tgcx_` names remain for compatibility with existing templates
 and installations.
 
 Maintainer packaging instructions are in
-[RELEASE-0](docs/instructions-release-0.md). `NEXT.md` tracks current work.
+[RELEASE-0](docs/agent-notes/instructions-release-0.md). `docs/PROYECTO.md` tracks current work.
 The project's own license remains undecided for this candidate. Credits
 and source attribution do not assign a license to third-party material.
 

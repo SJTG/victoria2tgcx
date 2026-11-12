@@ -4,22 +4,13 @@
 > between whoever implements (a person or an AI agent) and what must not
 > break: the user's game, TGC, and the multiplayer game.
 >
-> **What to do now: `NEXT.md`** — the only place that says it.
+> **Estado, decisiones y qué sigue: `docs/PROYECTO.md`** — the only status document.
+> Do not create other status files, reports or per-card instruction files; update that one.
+> Claude's own technical references (pitfalls, executable map, scripting, technical plan) live in
+> `docs/agent-notes/`. The user's design documents are the other files in `docs/`: leave them as they are.
 >
-> **Status, decisions, risks and session close: `ROADMAP.md`.** How each
-> mechanic is built: `docs/technical-plan.md`. How it stays compatible with
-> other TGC versions (deferred, D1): `docs/tgc-compatibility.md`.
->
-> **How to split the work among subagents, and the status of each card:
-> `SUBAGENTS.md`.**
->
-> **Index of `docs/`: `docs/README.md`.** Superseded material goes verbatim
-> to `docs/archive/`; nothing is deleted.
->
-> **Closing a session requires writing down what comes next** (`ROADMAP.md`
-> §7): archive the completed `NEXT.md` in `docs/archive/sessions.md`,
-> rewrite it, **write the step-by-step instructions for every card of the
-> next session** (`docs/instructions-<card>.md`) and update the statuses.
+> **Closing a session** means updating `docs/PROYECTO.md` (section 2 status, section 5 next steps).
+> Old reports, instructions, ROADMAP and SUBAGENTS were removed on 2026-11-11 and live only in git history.
 >
 > **This file replaces `CLAUDE.md`** in this project: none is created. The
 > `CLAUDE.md` in `C:\Users\JC\Downloads\` belongs to another project
@@ -75,7 +66,7 @@ Breaking any of these invalidates the implementation.
 | R6 | **The script part works without the DLL.** The DLL adds; it is not required to load the submod. If a byte signature does not match, that patch is not installed and the log says so | A user without the DLL, or with another build, is left without a game |
 | R7 | **In code, addresses are RVAs** (`base + rva`); the executable has ASLR. Ghidra VAs (`base 0x400000`) only in docs, with the conversion next to them | The game loads at another base (seen at `0x00080000`): a fixed VA lands anywhere (P7) |
 | R8 | **No third-party material enters git without a licence that allows it**: not the executable, not the Ghidra project, not TGC files. **V2DLL code may be used** (D6: the project is for personal use), but every file or function taken from V2DLL says so in a `// from V2DLL: <file>` comment so it can be removed if it is ever published | Redistribution without permission (§13) |
-| R9 | Decisions marked **[user]** are not taken by the agent: it prepares the data, recommends and asks | That is how everything important was decided (ROADMAP §3) |
+| R9 | Decisions marked **[user]** are not taken by the agent: it prepares the data, recommends and asks | That is how everything important was decided (history in git) |
 | R10 | **The mockups are the interface spec.** Before designing or implementing a mechanic, open its mockup (<https://claude.ai/artifact/Wt2YTaaM6xV8JXsUwapRV4>, boards Main, Bill, Ruler, Economy, Templates; PNG exports in `mockups\`) and replicate it as closely as the engine allows: layout, sprites, texts, numbers shown. Every deviation is written in the card's report with its reason. **If the mechanic itself changes, the mockup changes in the same session** (republish the artifact, re-export the PNGs) | What was agreed with the user is the mockup; an interface that drifts from it, or a mockup that no longer matches the mechanic, means designing twice |
 
 ---
@@ -111,7 +102,7 @@ E:\v2re\                                   <-- all reverse-engineering material,
 E:\tools\ghidra_12.1.4_PUBLIC\             Ghidra 12.1.4 (zip SHA-256 checked against the release)
 
 C:\Users\JC\Downloads\victoria2template\   <-- THIS PROJECT (git)
-├── AGENTS.md  NEXT.md  ROADMAP.md  SUBAGENTS.md
+├── AGENTS.md
 ├── docs\                 index in docs\README.md
 ├── mockups\              PNG exports of the interface mockups (ignored by git: game art, R8)
 ├── ghidra\               Ghidra scripts (ImportV2Symbols.java, ExportRtti.java, DecompileAt.java)
@@ -194,7 +185,7 @@ GUI drawing are runtime-confirmed (GH-2/U-5, 0.2.4). Visual polish remains
 implemented in 0.2.5 and confirmed working in game. HEMI-3 0.2.6 native
 seat hover is accepted and retained as the baseline; 0.2.8 aligns its cover
 with the native header border, accepted in game. Current status
-and next work are in ROADMAP.md and NEXT.md.
+and next work are in docs/PROYECTO.md.
 What is **not** known and is needed: which function decides whether a
 reform can be voted; how a GUI
 element (sprite and frame) is created or changed on the fly; the format of
@@ -310,7 +301,7 @@ user accepted nine-regiment recruitment and save/reload
 (`docs/report-tpl-0-runtime-1017.md`); the panel was detached at the upper
 left. The 0.4.0 DLL is retained in `E:\v2re\logs\tgcx-tpl-place-1017\`. The complete 0.3.5 DLL/submod rollback
 is retained privately.
-`NEXT.md` and `docs/instructions-tpl-0.md` give the current steps.
+`docs/PROYECTO.md` gives the current steps.
 
 Previous candidate: **0.3.5 (LAW-2 visible buttons, Reforms tab per board 1,
 `tgcx_` decisions hidden, DLL popups skipped)** on top of 0.3.4, whose look
@@ -378,14 +369,14 @@ Win32 platform. Its environment is set up in DLL-0.
 - In English (D10). Absolute dates (`2026-10-12`). Numbers with the tool
   that measured them.
 - A report (`docs/report-<card>-MMDD.md`) is not rewritten: if something
-  supersedes it, write a new one and update `ROADMAP.md` §1.
+  supersedes it, write a new one and update `docs/PROYECTO.md`.
 
 ---
 
 ## 8. Known pitfalls
 
 Index, one line per pitfall. **The full text (cause, symptom, fix) is in
-`docs/pitfalls.md`.** A new pitfall is added there and here with the next
+`docs/agent-notes/pitfalls.md`.** A new pitfall is added there and here with the next
 number (**the next one is P91**).
 
 - **P1** `git clone` with `core.autocrlf=true` converts TGC to CRLF (and can break misdetected binaries)
@@ -535,13 +526,21 @@ number (**the next one is P91**).
 | **D22** | Volunteers ownership and control | Independent donor-owned volunteer stacks; the sending player selects and commands them, recipient/AI gets no control. Keep our volunteer layout and reuse proved code. Donor ownership/accounting/flag/statistics remain intact; scope recipient war context to registered loan combat/access and vision until recipient peace. Replaces the recipient-owned prototype. | **closed** (user, 2026-10-27); docs/volunteers-design.md, docs/report-volunteers-donor-1027.md |
 | **D23** | Volunteers native appearance | Use actual in-game panel/button/row/arrow art and native fonts, following PRU/Conform. The flat placeholder UI is rejected. Keep chooser/forces structure, make panes flush and integrate placement with Diplomacy. Derived game pixels stay private outside tracked source. | **closed** (user, 2026-10-28); docs/report-volunteers-native-art-1028.md |
 | **D10** | Language | **English for everything**: code, comments, docs, file names, commit messages, in-game text and chat. Nothing is written in Spanish. All existing files were translated on 2026-10-12 | **closed** (user, 2026-10-12) |
+| **D24** | Party = faction, leader = character, ideology = seat bloc (one leader per party) | **closed** (user, 2026-11-09); `docs/plan-character-driven-1109-v3.md` |
+| **D25** | A bloc follows the leader of its party with the most seats (ties: first listed); bloc with no party uses the ideology's stance | **closed** (user, 2026-11-09) |
+| **D31** | A leader's stance changes the bloc's stance through cohesion: `round(c x leader + (1-c) x ideology)`; **prices unchanged** | **closed** (user, 2026-11-09) |
+| **D34** | Cohesion is a fixed number per party in `data/tgcx_leaders.txt` for the first plan; dynamic cohesion later | **closed** (user, 2026-11-09) |
+| **D35** | Parties is a tab of the Politics window (board 1b) | **closed** (user, 2026-11-09) |
+| D36 | Alliances between blocs with degrees (full follow ... subjugated) | **later** (user idea, 2026-11-09) |
+| D37-D43 | Cabecillas mixed; relation 0-10 per character (no favours pool, no money, no lots); vision + agenda; ask scaled by relation; puppet/alliances and party history later | **closed in principle** (user, 2026-11-10; `docs/plan-characters-favours-1110.md`; numbers are R9) |
+| D26-D30, D32, D33 | Leader names, ageing, Crown card, traits, package name, military faction, bloc without party: proposed in `docs/plan-character-driven-1109-v3.md` section 7, open until the user answers | proposed |
 
 ---
 
 
 ## 10. Roadmap
 
-Status and stages: `ROADMAP.md` §1. What comes next: `NEXT.md`.
+Status and next steps: `docs/PROYECTO.md`.
 
 ---
 

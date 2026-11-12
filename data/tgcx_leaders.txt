@@ -1,0 +1,106 @@
+# Characters: party leaders, cabecillas, their vision, agenda and relation with the player
+# (docs/plan-characters-favours-1110.md, D25, D34, D37-D43).
+# Read by tools/tgcx_leaders.py, tools/gen_law_catalog.py and tools/tgcx_bill_gui.py, not by the game.
+#
+# A bloc (an ideology holding upper-house seats) has two characters in the Bill window:
+#   0  the leader of its largest party (D25; ties: the party listed first). He leads
+#      `cohesion` percent of the bloc's seats (D34).
+#   1  a cabecilla, who leads the rest. Written here (`cabecilla = { ... }`) or automatic.
+# A country or bloc without a block here gets two automatic characters (D37): they use
+# the ideology's stance (data/tgcx_law_catalog.txt) and `auto.cohesion`.
+#
+# vision  = `stance` rows: the option he wants per law group. A group without a row uses the ideology's.
+# agenda  = the law groups he asks for in a deal, in order. Automatic characters: every group their
+#           ideology feels strongly about (intensity 2). When no agenda law is open, he asks for a
+#           pause on new bills instead (`freeze`).
+# relation = 0..10 with the player. It sets how much he asks, never a price (D38, D41).
+#
+# STATUS: every number and name below is a PLACEHOLDER for the user to review (R9). None is measured
+# from TGC or from history. Real parties per country come from CHAR-0.
+#
+# Keys per party: bloc, leader (display name), seats, cohesion (0..100), and optionally trait,
+# relation (0..10), rival (a bloc: while it rules, he likes you less), stance, agenda, cabecilla.
+# Keys of a cabecilla: name, and optionally trait, relation, rival, stance, agenda.
+
+# The hand-written countries below are used (auto characters everywhere else).
+enabled = yes
+# Legacy D31 (LAW-0 script-only generator, tools/gen_laws.py): blend the leader's stance into the
+# bloc's stance flags. Superseded by characters (D40); keep `no` so submod/ regenerates unchanged.
+blend_bloc_stance = no
+
+relation = {
+	start = 5
+	# Effective relation on a bill = relation + his stance on that bill + rival in power.
+	stance_shift = { p2 = 2 p1 = 1 z = 0 m1 = -2 m2 = -4 }
+	rival_rules = -2
+	# Bands by effective relation. Below `hostile` he refuses to deal. At `ally` he asks nothing.
+	bands = { hostile = 1 neutral = 4 friendly = 7 ally = 9 }
+	# What he asks: `steps` of one agenda law toward his ideal (0 = nothing), owed within `days`.
+	ask = {
+		hostile = { abstain = { steps = 1 days = 1095 } aye = { steps = 2 days = 730 } }
+		neutral = { abstain = { steps = 1 days = 2555 } aye = { steps = 1 days = 1825 } }
+		friendly = { abstain = { steps = 0 days = 0 } aye = { steps = 1 days = 3650 } }
+	}
+	# With no agenda law open he asks for no new bills for this many days after the deal.
+	freeze = {
+		hostile = { abstain = 730 aye = 1460 }
+		neutral = { abstain = 365 aye = 730 }
+		friendly = { abstain = 0 aye = 365 }
+	}
+	# Start relation of an automatic character (hand-written `relation` rows are used as written):
+	# the base `start`, + `ruling` when his bloc's ideology rules, and a change by his distance on this
+	# left-right scale to the ruling ideology (d2 = two places apart). Placeholders, R9.
+	start_relation = {
+		ruling = 2
+		scale = { reactionary = 0 conservative = 1 liberal = 2 socialist = 3 communist = 4 }
+		distance = { d1 = 0 d2 = -1 d3 = -2 d4 = -3 }
+	}
+	# Relation changes: a kept or broken deal, a passed law he was for or against.
+	kept = 1
+	broken = -3
+	law_liked = 1
+	law_disliked = -1
+}
+
+auto = {
+	cohesion = 70
+}
+
+
+# The country block is the TGC tag. The 1836 United Kingdom is ENG in TGC v2.5.2
+# (tgcx.log: tag=ENG), not GBR.
+ENG = {
+	tories = {
+		bloc = conservative
+		leader = "Duke of Wellington"
+		seats = 85
+		cohesion = 70
+		trait = free_press_advocate
+		relation = 3
+		rival = liberal
+		stance = {
+			press_rights = { ideal = free_press intensity = 1 }
+			public_meetings = { ideal = no_meeting intensity = 2 }
+		}
+		agenda = { public_meetings }
+		cabecilla = {
+			name = "Sir Robert Peel"
+			trait = pragmatist
+			relation = 6
+			stance = {
+				press_rights = { ideal = free_press intensity = 1 }
+				wage_reform = { ideal = trinket_wage intensity = 1 }
+			}
+			agenda = { wage_reform }
+		}
+	}
+	whigs = {
+		bloc = liberal
+		leader = "Viscount Melbourne"
+		seats = 10
+		cohesion = 85
+		trait = cautious_reformer
+		relation = 7
+		rival = conservative
+	}
+}

@@ -24,9 +24,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tgc_scan import parse, read  # noqa: E402
+import tgcx_leaders  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_TGC = r"E:\Victoria.II.v3.04.Inclu.ALL.DLC\mod\TGC_v2.5.2\TGC"
+# Override with the TGCX_TGC environment variable (tests and tools on another machine).
+DEFAULT_TGC = os.environ.get("TGCX_TGC") or r"E:\Victoria.II.v3.04.Inclu.ALL.DLC\mod\TGC_v2.5.2\TGC"
 SUB = os.path.join(ROOT, "submod")
 
 # Event ids (D8 range; LAW-0 owns 420 000 100 - 420 000 199).
@@ -145,6 +147,9 @@ class Gen:
         self.limited = [v for _, v in leg["limited"]]
         self.full = [v for _, v in leg["full"]]
         self.distrust = [v for _, v in self.L["crown_distrusts"]]
+                # Legacy D31 (superseded by characters, D40): only with `blend_bloc_stance = yes`.
+        _, leaders = tgcx_leaders.load()
+        self.leaders = leaders if tgcx_leaders.load_flags()[1] else {}
         self.bills = []
         for g, spec in self.L["bills"]:
             spec = as_dict(spec)
@@ -170,12 +175,52 @@ class Gen:
         spec = as_dict(self.aff[ideology].get(group, [])) if group in self.aff[ideology] else None
         if spec is None:
             return "z"
+        return self.spec_stance(spec, group, frm, to)
+
+    def spec_stance(self, spec, group, frm, to):
+        """Stance code of one {ideal, intensity} row for the bill frm -> to."""
         opts = self.groups[group]["options"]
         ideal = frm if spec["ideal"] == "status_quo" else spec["ideal"]
         i_ideal, i_from, i_to = opts.index(ideal), opts.index(frm), opts.index(to)
         before, after = abs(i_from - i_ideal), abs(i_to - i_ideal)
         k = int(spec["intensity"])
         return "z" if before == after else (f"p{k}" if after < before else f"m{k}")
+
+    def led_stance(self, tag, ideology, group, frm, to):
+        """The bloc's stance in country `tag`: its leading party's leader blended with the ideology (D25-D27)."""
+        base = self.stance(ideology, group, frm, to)
+        party = tgcx_leaders.lead_party(self.leaders[tag], ideology)
+        if party is None or group not in party.stance:
+            return base
+        leader = self.spec_stance(party.stance[group], group, frm, to)
+        return tgcx_leaders.effective_code(party, base, leader)
+
+    def check_leaders(self):
+        """Leader data must name real blocs, law groups and options: fail at generation, not in game."""
+        for tag, parties in self.leaders.items():
+            for p in parties:
+                if p.bloc not in self.blocs:
+                    sys.exit(f"gen_laws: leaders {tag}.{p.key}: bloc {p.bloc} has no stance in the affinity data")
+                for g, spec in p.stance.items():
+                    if g not in self.groups:
+                        sys.exit(f"gen_laws: leaders {tag}.{p.key}: {g} is not a law group in TGC's issues.txt")
+                    if spec["ideal"] != "status_quo" and spec["ideal"] not in self.groups[g]["options"]:
+                        sys.exit(f"gen_laws: leaders {tag}.{p.key}.{g}: {spec['ideal']} is not an option")
+
+    def stance_flag_effects(self, group, frm, to):
+        """set_country_flag effects for a bill. Without leader data: one flag per bloc, as before.
+        With it: countries that have data get their own flags; every other country keeps the ideology's."""
+        def flags(stance_of):
+            return [f"set_country_flag = tgcx_stance_{i}_{stance_of(i)}" for i in self.blocs]
+        default = flags(lambda i: self.stance(i, group, frm, to))
+        if not self.leaders:
+            return default
+        tags = sorted(self.leaders)
+        others = "NOT = { " + " ".join(f"tag = {t}" for t in tags) + " }"
+        out = [when(others, " ".join(default))]
+        for t in tags:
+            out.append(when(f"tag = {t}", " ".join(flags(lambda i, t=t: self.led_stance(t, i, group, frm, to)))))
+        return out
 
     # --- the count (§4): constants per slice, conditions on the stance flags
 
@@ -279,6 +324,7 @@ class Gen:
         self.events.append("\n".join(body))
 
     def build(self):
+        self.check_leaders()
         count = self.count_block()
         report = self.report_block()
         cleanup = self.cleanup_block()
@@ -295,7 +341,7 @@ class Gen:
             if frm not in grp["options"] or to not in grp["options"]:
                 sys.exit(f"gen_laws: {g}: {frm} or {to} is not an option in TGC's issues.txt")
             allow = as_dict(grp["body"][to]).get("allow", [])
-            stance_flags = [f"set_country_flag = tgcx_stance_{i}_{self.stance(i, g, frm, to)}" for i in self.blocs]
+            stance_flags = self.stance_flag_effects(g, frm, to)
             name = f"tgcx_law_{g}_{to}"
             self.decision(
                 name, f"Bill: {self.pretty(to)}",
